@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import db from '../../lib/db';
+import db from '../../../lib/db';
 
 async function notificarTelegram(mensaje) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
