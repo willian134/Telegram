@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
-import db from '../../lib/db';
+import path from 'path';
+
+// Importación segura independiente de la profundidad del archivo
+const dbPath = path.resolve(process.cwd(), 'lib', 'db.js');
+const db = require(dbPath).default || require(dbPath);
 
 async function notificarTelegram(mensaje) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
