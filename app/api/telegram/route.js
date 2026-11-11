@@ -1,126 +1,131 @@
 ﻿import { NextResponse } from 'next/server';
 import db from '../../../lib/db';
-import { initScheduler } from '../../../lib/scheduler';
 
-initScheduler();
+const TELEGRAM_SECRET = process.env.TELEGRAM_SECRET_TOKEN || 'MiSecretoAlarma123';
+const API_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// Credenciales directas para evitar fallos de lectura de variables de entorno
-const TELEGRAM_TOKEN = '9210604722:AAHuIff1HfBfpINr8LdH18aibLHmmkbUlAE';
-const SECRET_TOKEN = 'mi_secreto_webhook_alarma_2026';
-
-async function responderTelegram(chatId, text) {
+async function enviarMensajeTelegram(chatId, mensaje) {
+  if (!API_TOKEN) return;
   try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+    await fetch(`https://api.telegram.org/bot${API_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text })
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: mensaje,
+        parse_mode: 'Markdown'
+      })
     });
-  } catch (err) {
-    console.error('Error al responder en Telegram:', err);
+  } catch (error) {
+    console.error('Error al enviar respuesta a Telegram:', error);
   }
 }
 
 export async function POST(req) {
-  const headerSecret = req.headers.get('X-Telegram-Bot-Api-Secret-Token');
-  if (headerSecret !== SECRET_TOKEN) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
-  }
-
-  const body = await req.json();
-  console.log('Mensaje recibido en Webhook:', JSON.stringify(body));
-
-  const message = body.message;
-  if (!message || !message.text) {
-    return NextResponse.json({ status: 'ok' });
-  }
-
-  const chatId = String(message.chat.id);
-  const text = message.text.trim();
-  const nombre = message.from.first_name || 'Usuario';
-
-  // Buscar usuario
-  let usuario = db.prepare('SELECT * FROM usuarios WHERE chat_id = ?').get(chatId);
-
-  // Si no existe, crearlo automáticamente
-  if (!usuario) {
-    const countResult = db.prepare('SELECT COUNT(*) as count FROM usuarios').get();
-    const totalUsuarios = countResult ? countResult.count : 0;
-    const rolInicial = totalUsuarios === 0 ? 'administrador' : 'invitado';
-
-    try {
-      db.prepare('INSERT INTO usuarios (chat_id, dispositivo, rol) VALUES (?, ?, ?)').run(chatId, 'alarma1', rolInicial);
-    } catch (e) {
-      // Fallback si la tabla usa columnas distintas
-      console.log('Error insertando usuario, intentando fallback:', e.message);
-    }
-    usuario = { chat_id: chatId, dispositivo: 'alarma1', rol: rolInicial };
-  }
-
-  // Verificar si es admin
-  const esAdmin = usuario.rol === 'administrador' || usuario.rol === 'admin';
-
-  // Comando /start
-  if (text === '/start') {
-    await responderTelegram(
-      chatId, 
-      `Hola ${nombre}.\nTu rol actual es: ${usuario.rol}.\n\nComandos disponibles:\n/estado\n/historial\n/armar\n/desarmar\n/abrir`
-    );
-    return NextResponse.json({ status: 'ok' });
-  }
-
-  // Comando /estado
-  if (text === '/estado') {
-    const ultimo = db.prepare(`
-      SELECT tipo FROM eventos 
-      WHERE tipo IN ('armado', 'desarmado', 'disparo') 
-      ORDER BY fecha DESC LIMIT 1
-    `).get();
+  try {
+    // 1. Validar la cabecera del Secret Token de Telegram
+    const secretHeader = req.headers.get('x-telegram-bot-api-secret-token');
     
-    const estado = ultimo ? ultimo.tipo.toUpperCase() : 'DESCONOCIDO (SIN EVENTOS)';
-    await responderTelegram(chatId, `Estado del sistema: ${estado}`);
-    return NextResponse.json({ status: 'ok' });
-  }
-
-  // Comando /historial
-  if (text === '/historial') {
-    const eventos = db.prepare('SELECT tipo, origen, fecha FROM eventos ORDER BY fecha DESC LIMIT 10').all();
-    if (eventos.length === 0) {
-      await responderTelegram(chatId, 'El historial está vacío.');
-    } else {
-      const listado = eventos.map(e => `• [${e.fecha}] ${e.tipo} (${e.origen})`).join('\n');
-      await responderTelegram(chatId, `Últimos 10 eventos:\n${listado}`);
+    if (secretHeader !== TELEGRAM_SECRET) {
+      console.warn('Intento de acceso al webhook con token secreto inválido.');
+      return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
     }
-    return NextResponse.json({ status: 'ok' });
-  }
 
-  // Comandos de control
-  if (['/armar', '/desarmar', '/abrir', '/activar'].includes(text)) {
-    if (!esAdmin) {
-      db.prepare(`
-        INSERT INTO eventos (tipo, origen, descripcion) 
-        VALUES ('rechazo', 'telegram', ?)
-      `).run(`Intento no autorizado de ${text}`);
+    const body = await req.json();
+
+    // Procesar mensajes entrantes de Telegram
+    if (body.message && body.message.text) {
+      const chatId = String(body.message.chat.id);
+      const text = body.message.text.trim();
+
+      // Verificar o registrar al usuario si interactúa dinámicamente
+      let usuario = db.prepare('SELECT rol FROM usuarios WHERE chat_id = ?').get(chatId);
       
-      await responderTelegram(chatId, 'No estás autorizado para enviar esta orden.');
-      return NextResponse.json({ status: 'ok' });
+      if (!usuario) {
+        db.prepare(`
+          INSERT INTO usuarios (chat_id, dispositivo, rol) 
+          VALUES (?, 'alarma1', 'invitado')
+        `).run(chatId);
+        usuario = { rol: 'invitado' };
+      }
+
+      const rol = usuario.rol;
+
+      // Comando: /start
+      if (text === '/start') {
+        await enviarMensajeTelegram(
+          chatId,
+          `👋 *¡Hola! Sistema de Alarma IoT Activo*\n\n` +
+          `👤 *Tu rol actual:* \`${rol}\`\n\n` +
+          `📋 *Comandos disponibles:*\n` +
+          `/estado - Consultar el estado del sistema\n` +
+          `/historial - Ver últimos eventos\n` +
+          `/armar - Armar el sistema\n` +
+          `/desarmar - Desarmar el sistema\n` +
+          `/abrir - Abrir cerradura (Solo Admin)`
+        );
+        return NextResponse.json({ status: 'ok' });
+      }
+
+      // Comando: /estado
+      if (text === '/estado') {
+        const ultimoEvento = db.prepare('SELECT * FROM eventos ORDER BY id DESC LIMIT 1').get();
+        const descripcion = ultimoEvento ? `${ultimoEvento.tipo} (${ultimoEvento.descripcion})` : 'DESCONOCIDO (SIN EVENTOS)';
+        
+        await enviarMensajeTelegram(chatId, `📊 *Estado del sistema:* ${descripcion}`);
+        return NextResponse.json({ status: 'ok' });
+      }
+
+      // Comando: /historial
+      if (text === '/historial') {
+        const eventos = db.prepare('SELECT * FROM eventos ORDER BY id DESC LIMIT 5').all();
+        let msj = '📜 *Últimos 5 eventos:*\n\n';
+        eventos.forEach(e => {
+          msj += `• *${e.tipo}* - ${e.descripcion} (${e.fecha})\n`;
+        });
+        await enviarMensajeTelegram(chatId, msj);
+        return NextResponse.json({ status: 'ok' });
+      }
+
+      // Comando: /armar
+      if (text === '/armar') {
+        db.prepare('INSERT INTO ordenes (dispositivo, accion, origen) VALUES (?, ?, ?)').run('alarma1', 'ARMAR', `Telegram (${rol})`);
+        db.prepare('INSERT INTO eventos (tipo, origen, descripcion) VALUES (?, ?, ?)').run('ORDEN', `Telegram (${rol})`, 'Orden ARMAR recibida por Telegram');
+        
+        await enviarMensajeTelegram(chatId, '🔒 Orden *"ARMAR"* guardada. El ESP32 la ejecutará al conectarse.');
+        return NextResponse.json({ status: 'ok' });
+      }
+
+      // Comando: /desarmar
+      if (text === '/desarmar') {
+        db.prepare('INSERT INTO ordenes (dispositivo, accion, origen) VALUES (?, ?, ?)').run('alarma1', 'DESARMAR', `Telegram (${rol})`);
+        db.prepare('INSERT INTO eventos (tipo, origen, descripcion) VALUES (?, ?, ?)').run('ORDEN', `Telegram (${rol})`, 'Orden DESARMAR recibida por Telegram');
+        
+        await enviarMensajeTelegram(chatId, '🔓 Orden *"DESARMAR"* guardada. El ESP32 la ejecutará al conectarse.');
+        return NextResponse.json({ status: 'ok' });
+      }
+
+      // Comando: /abrir (Restringido por ROL)
+      if (text === '/abrir') {
+        if (rol !== 'administrador') {
+          await enviarMensajeTelegram(
+            chatId, 
+            '⛔ *Acceso Denegado*\nTu rol actual (`invitado`) no tiene permisos para accionar la cerradura.'
+          );
+          return NextResponse.json({ status: 'ok' });
+        }
+
+        db.prepare('INSERT INTO ordenes (dispositivo, accion, origen) VALUES (?, ?, ?)').run('alarma1', 'ABRIR', `Telegram (${rol})`);
+        db.prepare('INSERT INTO eventos (tipo, origen, descripcion) VALUES (?, ?, ?)').run('ORDEN', `Telegram (${rol})`, 'Pulso de ABRIR generado desde Telegram por Admin');
+        
+        await enviarMensajeTelegram(chatId, '⚡ Pulso de *"APERTURA"* enviado a la cerradura.');
+        return NextResponse.json({ status: 'ok' });
+      }
     }
 
-    const accionMap = { 
-      '/armar': 'armar', 
-      '/activar': 'armar', 
-      '/desarmar': 'desarmar', 
-      '/abrir': 'abrir' 
-    };
-    const accion = accionMap[text];
-
-    db.prepare(`
-      INSERT INTO ordenes (dispositivo, accion, origen, entregado) 
-      VALUES ('alarma1', ?, 'telegram', 0)
-    `).run(accion);
-
-    await responderTelegram(chatId, `Orden "${accion}" guardada. El ESP32 la ejecutará al conectarse.`);
     return NextResponse.json({ status: 'ok' });
+  } catch (error) {
+    console.error('Error en POST /api/telegram:', error);
+    return NextResponse.json({ error: 'Error interno del servidor' }, { status: 500 });
   }
-
-  return NextResponse.json({ status: 'ok' });
 }
