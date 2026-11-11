@@ -3,7 +3,6 @@ import db from '../../../../lib/db';
 
 const API_KEY = process.env.ESP32_API_KEY || 'Mi casa alarma';
 
-// 1. Obtener órdenes pendientes sin borrarlas/confirmarlas automáticamente
 export async function GET(req) {
   const apiKey = req.headers.get('X-API-Key');
 
@@ -13,6 +12,17 @@ export async function GET(req) {
 
   const { searchParams } = new URL(req.url);
   const dispositivo = searchParams.get('dispositivo') || 'alarma1';
+
+  // REGISTRAR PING DEL ESP32 PARA EL ESTADO EN LÍNEA
+  try {
+    db.prepare(`
+      INSERT INTO usuarios (chat_id, dispositivo, rol) 
+      VALUES (?, ?, datetime('now')) 
+      ON CONFLICT(chat_id) DO UPDATE SET rol = datetime('now')
+    `).run(`ping_${dispositivo}`, dispositivo);
+  } catch (e) {
+    console.error('Error al guardar ping:', e);
+  }
 
   const ordenes = db.prepare(`
     SELECT id, accion, origen 
@@ -24,7 +34,6 @@ export async function GET(req) {
   return NextResponse.json({ ordenes });
 }
 
-// 2. Confirmar la entrega cuando el ESP32 (o PowerShell) procesa la orden
 export async function POST(req) {
   const apiKey = req.headers.get('X-API-Key');
 
